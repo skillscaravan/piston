@@ -32,6 +32,11 @@ RUN apt-get update && \
     libsundials-dev libpcre2-dev libcap-dev && \
     rm -rf /var/lib/apt/lists/*
 RUN useradd -M piston
+
+# Create the data directory so the image is self-sufficient when no volume
+# is mounted at /piston. config.js validates this exists; entrypoint chowns it.
+RUN mkdir -p /piston && chown piston:piston /piston
+
 COPY --from=isolate /usr/local/bin/isolate /usr/local/bin
 COPY --from=isolate /usr/local/etc/isolate /usr/local/etc/isolate
 

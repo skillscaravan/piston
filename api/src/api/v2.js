@@ -7,6 +7,7 @@ const runtime = require('../runtime');
 const { Job } = require('../job');
 const package = require('../package');
 const globals = require('../globals');
+const remote_files = require('../remote_files');
 const logger = require('logplease').create('api/v2');
 
 function get_job(body) {
@@ -22,6 +23,8 @@ function get_job(body) {
         compile_timeout,
         run_cpu_time,
         compile_cpu_time,
+        tenant_id,
+        remote_files: req_remote_files,
     } = body;
 
     return new Promise((resolve, reject) => {
@@ -45,6 +48,22 @@ function get_job(body) {
                 return reject({
                     message: `files[${i}].content is required as a string`,
                 });
+            }
+        }
+
+        const normalized_remote_files = req_remote_files ?? [];
+        if (normalized_remote_files.length > 0) {
+            try {
+                const file_names = files
+                    .map((f, i) => f.name || `file${i}.code`)
+                    .filter(Boolean);
+                remote_files.validate_remote_files_request(
+                    normalized_remote_files,
+                    tenant_id,
+                    file_names
+                );
+            } catch (err) {
+                return reject({ message: err.message });
             }
         }
 
@@ -102,6 +121,8 @@ function get_job(body) {
                 args: args ?? [],
                 stdin: stdin ?? '',
                 files,
+                tenant_id: tenant_id ?? null,
+                remote_files: normalized_remote_files,
                 timeouts: {
                     run: run_timeout ?? rt.timeouts.run,
                     compile: compile_timeout ?? rt.timeouts.compile,

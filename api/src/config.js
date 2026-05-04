@@ -137,6 +137,51 @@ const options = {
             validate_overrides,
         ],
     },
+    remote_files_enabled: {
+        desc: 'Set to true to allow callers to attach remote_files (e.g. signed URLs) to execute requests',
+        default: false,
+        parser: x => x === 'true',
+        validators: [x => typeof x === 'boolean' || `${x} is not a boolean`],
+    },
+    remote_files_host_allowlist: {
+        desc: 'Comma-separated list of hostnames allowed for remote_files URLs. Acts as the SSRF guard',
+        default: ['storage.googleapis.com'],
+        parser: parse_csv,
+        validators: [
+            x =>
+                Array.is_array(x) ||
+                `${x} could not be parsed as a comma-separated list`,
+        ],
+    },
+    remote_files_cache_dir: {
+        desc: 'Absolute path to the on-disk cache for remote_files. MUST be on the same filesystem as the isolate box root for hardlinks to work',
+        default: '/piston/remote-files-cache',
+        validators: [],
+    },
+    remote_files_cache_max_bytes: {
+        desc: 'Hard cap on total bytes stored in the remote_files cache; LRU eviction kicks in past this',
+        default: 5 * 1024 * 1024 * 1024,
+        parser: parse_int,
+        validators: [(x, raw) => !is_nan(x) || `${raw} is not a number`],
+    },
+    remote_files_max_object_size: {
+        desc: 'Per-object hard cap in bytes for remote_files. Fetches exceeding this are aborted',
+        default: 100 * 1024 * 1024,
+        parser: parse_int,
+        validators: [(x, raw) => !is_nan(x) || `${raw} is not a number`],
+    },
+    remote_files_max_total_bytes: {
+        desc: 'Maximum sum of remote_files object sizes per execute request',
+        default: 200 * 1024 * 1024,
+        parser: parse_int,
+        validators: [(x, raw) => !is_nan(x) || `${raw} is not a number`],
+    },
+    remote_files_fetch_timeout_ms: {
+        desc: 'Per-object fetch timeout in milliseconds',
+        default: 30000,
+        parser: parse_int,
+        validators: [(x, raw) => !is_nan(x) || `${raw} is not a number`],
+    },
 };
 
 Object.freeze(options);
@@ -149,6 +194,16 @@ function apply_validators(validators, validator_parameters) {
         }
     }
     return true;
+}
+
+function parse_csv(raw) {
+    if (raw === undefined || raw === null) return [];
+    if (Array.is_array(raw)) return raw;
+    if (typeof raw !== 'string') return null;
+    return raw
+        .split(',')
+        .map(x => x.trim())
+        .filter(x => x.length > 0);
 }
 
 function parse_overrides(overrides_string) {

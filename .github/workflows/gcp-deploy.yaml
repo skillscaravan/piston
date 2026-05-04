@@ -1,0 +1,126 @@
+name: Build and Push Piston Image to GCP
+# Triggers:
+#   - push to dev / stg  -> build, push to skcn-nonprod (env=dev|stg)
+#   - push of any tag    -> build, push to skcn-prod    (env=prod)
+#   - manual dispatch
+#
+# This workflow ONLY builds and pushes the image to Artifact Registry.
+# Rollout to GKE / Compute is intentionally not in this file. Piston needs
+# --privileged + cgroup v2, so Cloud Run is NOT a valid target.
+on:
+    workflow_dispatch:
+    push:
+        branches:
+            - dev
+            - stg
+        tags:
+            - '*'
+
+env:
+    APP_NAME: piston
+    GCP_REGION: asia-south1
+
+jobs:
+    prepare-env:
+        name: Prepare Env
+        runs-on: ubuntu-latest
+        timeout-minutes: 2
+        outputs:
+            GCP_PROJECT_ID: ${{ steps.vars.outputs.GCP_PROJECT_ID }}
+            SLACK_WEBHOOK_URL: ${{ steps.vars.outputs.SLACK_WEBHOOK_URL }}
+            IMAGE_TAG: ${{ steps.vars.outputs.IMAGE_TAG }}
+            GCP_PROJECT_NUMBER: ${{ steps.vars.outputs.GCP_PROJECT_NUMBER }}
+            ENVIRONMENT: ${{ steps.vars.outputs.ENVIRONMENT }}
+        steps:
+            - id: vars
+              run: |
+                  set -euo pipefail
+                  if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+                      GCP_PROJECT_ID="skcn-prod"
+                      GCP_PROJECT_NUMBER="843136536833"
+                      SLACK_WEBHOOK_URL="SLACK_WEBHOOK_URL_MAIN"
+                      IMAGE_TAG="${GITHUB_REF_NAME}"
+                      ENVIRONMENT="prod"
+                  else
+                      BRANCH="${GITHUB_REF#refs/heads/}"
+                      case "$BRANCH" in
+                          dev|stg)
+                              GCP_PROJECT_ID="skcn-nonprod"
+                              GCP_PROJECT_NUMBER="27476519725"
+                              SLACK_WEBHOOK_URL="SLACK_WEBHOOK_URL_DEV"
+                              IMAGE_TAG="${GITHUB_SHA:0:7}-${GITHUB_RUN_NUMBER}-$(date +%s)"
+                              ENVIRONMENT="$BRANCH"
+                              ;;
+                          *)
+                              echo "Branch '$BRANCH' not configured for deploy"
+                              exit 1
+                              ;;
+                      esac
+                  fi
+                  {
+                      echo "GCP_PROJECT_ID=$GCP_PROJECT_ID"
+                      echo "GCP_PROJECT_NUMBER=$GCP_PROJECT_NUMBER"
+                      echo "SLACK_WEBHOOK_URL=$SLACK_WEBHOOK_URL"
+                      echo "IMAGE_TAG=$IMAGE_TAG"
+                      echo "ENVIRONMENT=$ENVIRONMENT"
+                  } >> "$GITHUB_OUTPUT"
+
+            - name: Summary
+              run: |
+                  {
+                      echo ":seedling: Ref: ${GITHUB_REF}"
+                      echo ":package: Environment: ${{ steps.vars.outputs.ENVIRONMENT }}"
+                      echo ":label: Image tag: ${{ steps.vars.outputs.IMAGE_TAG }}"
+                  } >> "$GITHUB_STEP_SUMMARY"
+
+    build-push-image:
+        needs:
+            - prepare-env
+        name: Build and Push Image
+        permissions:
+            id-token: write
+            contents: read
+        runs-on: ubuntu-latest
+        env:
+            GCP_WORKLOAD_IDENTITY_PROVIDER: projects/${{ needs.prepare-env.outputs.GCP_PROJECT_NUMBER }}/locations/global/workloadIdentityPools/github-oidc-pool/providers/github-provider
+            GCP_WORKLOAD_IDENTITY_SA: github-actions-sa@${{ needs.prepare-env.outputs.GCP_PROJECT_ID }}.iam.gserviceaccount.com
+            GCP_PROJECT_ID: ${{ needs.prepare-env.outputs.GCP_PROJECT_ID }}
+            IMAGE_TAG: ${{ needs.prepare-env.outputs.IMAGE_TAG }}
+            ENVIRONMENT: ${{ needs.prepare-env.outputs.ENVIRONMENT }}
+        outputs:
+            IMAGE_TAG: ${{ steps.build.outputs.IMAGE_TAG }}
+            GAR_REPO: ${{ steps.build.outputs.GAR_REPO }}
+        steps:
+            - name: Checkout repository on ${{ github.ref }}
+              uses: actions/checkout@v4
+
+            - id: auth
+              name: Authenticate to Google Cloud
+              uses: google-github-actions/auth@v2
+              with:
+                  token_format: access_token
+                  create_credentials_file: 'true'
+                  workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+                  service_account: ${{ env.GCP_WORKLOAD_IDENTITY_SA }}
+
+            - name: Login to Artifact Registry
+              uses: docker/login-action@v3
+              with:
+                  registry: ${{ env.GCP_REGION }}-docker.pkg.dev
+                  username: oauth2accesstoken
+                  password: ${{ steps.auth.outputs.access_token }}
+
+            - id: build
+              name: Build and Push Image
+              env:
+                  GAR_REGISTRY: ${{ env.GCP_REGION }}-docker.pkg.dev
+              run: |
+                  set -euo pipefail
+                  GAR_REPO="${GAR_REGISTRY}/${GCP_PROJECT_ID}/${GCP_PROJECT_ID}-application/${ENVIRONMENT}-${APP_NAME}"
+                  docker build -t "$GAR_REPO:$IMAGE_TAG" -f Dockerfile-gcp .
+                  docker push "$GAR_REPO:$IMAGE_TAG"
+                  {
+                      echo "GAR_REPO=$GAR_REPO"
+                      echo "IMAGE_TAG=$IMAGE_TAG"
+                  } >> "$GITHUB_OUTPUT"
+                  echo ":whale2: Pushed: $GAR_REPO:$IMAGE_TAG" >> "$GITHUB_STEP_SUMMARY"

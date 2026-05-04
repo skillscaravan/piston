@@ -198,3 +198,70 @@ PISTON_LIMIT_OVERRIDES={"c++":{"max_process_count":128}}
 ```
 
 This will give `c++` a max_process_count of 128 regardless of the configuration.
+
+## Remote Files
+
+Configuration for the [remote_files feature](remote-files.md), which lets callers attach signed-URL datasets to execute requests. The dataset is fetched by the API process, cached on disk, and materialized inside the sandbox before run. The sandbox itself stays network-disabled.
+
+### Enable
+
+```yaml
+key: PISTON_REMOTE_FILES_ENABLED
+default: false
+```
+
+Master feature flag. When `false`, requests with non-empty `remote_files` are rejected with HTTP 400.
+
+### Host allowlist
+
+```yaml
+key: PISTON_REMOTE_FILES_HOST_ALLOWLIST
+default: storage.googleapis.com
+```
+
+Comma-separated list of hostnames Piston is allowed to fetch from. Acts as the SSRF guard. Add hosts as needed (e.g. `s3.amazonaws.com`, `*.blob.core.windows.net`-style virtual-host buckets, etc.). Exact match only.
+
+### Cache directory
+
+```yaml
+key: PISTON_REMOTE_FILES_CACHE_DIR
+default: /piston/remote-files-cache
+```
+
+On-disk cache location. **Must be on the same filesystem as `/var/local/lib/isolate`** for hardlinks to work. On startup Piston verifies this and exits if they differ. At runtime, if the link still fails, Piston falls back to a file copy and logs a warning.
+
+### Cache size cap
+
+```yaml
+key: PISTON_REMOTE_FILES_CACHE_MAX_BYTES
+default: 5368709120 # 5 GB
+```
+
+Maximum total bytes stored in the cache. LRU eviction kicks in when exceeded.
+
+### Per-object size cap
+
+```yaml
+key: PISTON_REMOTE_FILES_MAX_OBJECT_SIZE
+default: 104857600 # 100 MB
+```
+
+Hard limit on a single fetched object. Fetches that exceed this are aborted mid-stream and surface as HTTP 400 to the caller.
+
+### Per-request total size cap
+
+```yaml
+key: PISTON_REMOTE_FILES_MAX_TOTAL_BYTES
+default: 209715200 # 200 MB
+```
+
+Hard limit on the sum of `remote_files[]` sizes per execute request.
+
+### Fetch timeout
+
+```yaml
+key: PISTON_REMOTE_FILES_FETCH_TIMEOUT_MS
+default: 30000
+```
+
+Per-object fetch timeout in milliseconds. Slow origins or large datasets may need this raised.

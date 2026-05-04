@@ -42,6 +42,13 @@ RUN apt-get update && \
     libsundials-dev libpcre2-dev libcap-dev && \
     rm -rf /var/lib/apt/lists/*
 RUN useradd -M piston
+
+# Create the data directory so the image is self-sufficient when no volume
+# is mounted at /piston (e.g. on the first pod start before the PVC is bound,
+# or in any env that forgets to mount). config.js validates that this exists,
+# and the entrypoint chowns it; both must succeed or the container crash-loops.
+RUN mkdir -p /piston && chown piston:piston /piston
+
 COPY --from=isolate /usr/local/bin/isolate /usr/local/bin
 COPY --from=isolate /usr/local/etc/isolate /usr/local/etc/isolate
 

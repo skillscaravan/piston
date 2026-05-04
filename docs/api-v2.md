@@ -9,6 +9,11 @@ The API is exposed from the container, by default on port 2000, at `/api/v2/`.
 All inputs are validated, and if an error occurs, a 4xx or 5xx status code is returned.
 In this case, a JSON payload is sent back containing the error message as `message`
 
+In addition, two operational endpoints live at the root for orchestrator probes:
+
+-   `GET /healthz` — liveness probe. See [Operational Endpoints](#operational-endpoints).
+-   `GET /readyz` — readiness probe. See [Operational Endpoints](#operational-endpoints).
+
 ## Runtimes
 
 ### `GET /api/v2/runtimes`
@@ -67,6 +72,11 @@ Runs the given code, using the given runtime and arguments, returning the result
 -   `compile_timeout` (_optional_): The maximum allowed time in milliseconds for the run stage to finish before bailing out. Must be a number, less than or equal to the configured maximum timeout. Defaults to maximum.
 -   `compile_memory_limit` (_optional_): The maximum amount of memory the compile stage is allowed to use in bytes. Must be a number, less than or equal to the configured maximum. Defaults to maximum, or `-1` (no limit) if none is configured.
 -   `run_memory_limit` (_optional_): The maximum amount of memory the run stage is allowed to use in bytes. Must be a number, less than or equal to the configured maximum. Defaults to maximum, or `-1` (no limit) if none is configured.
+-   `tenant_id` (_optional_, _required when `remote_files` is set_): Identifier for the calling tenant. Used as part of the `remote_files` cache key for tenant isolation and audit logging. Must match `^[a-z0-9][a-z0-9_-]{0,63}$`.
+-   `remote_files` (_optional_): An array of dataset descriptors to fetch from cloud storage and materialize inside the sandbox before run. Disabled by default; the operator must enable the feature via `PISTON_REMOTE_FILES_ENABLED=true`. See [Remote Files](remote-files.md) for the full guide.
+-   `remote_files[].url`: HTTPS URL of the dataset object. Hostname must be in `PISTON_REMOTE_FILES_HOST_ALLOWLIST`. Typically a v4 signed URL minted by your platform.
+-   `remote_files[].name`: Filename inside the sandbox that the dataset will be available at. Must not collide with another file and must not escape the submission directory.
+-   `remote_files[].version` (_optional_): Caller-supplied version string used as part of the cache key. Use the GCS object generation, semver, or a content hash. Treat the empty string as "no version-based invalidation."
 
 #### Response
 
@@ -233,3 +243,122 @@ Content-Type: application/json
   "version": "5.1.0"
 }
 ```
+
+## Operational Endpoints
+
+These exist for container orchestrators (Kubernetes, Cloud Run, ECS) to probe the API. They are intentionally cheap and do not exercise sandboxed execution.
+
+### `GET /healthz` — liveness
+
+Returns 200 as long as the Node.js event loop is responsive. If the orchestrator's probe times out, the pod is presumed deadlocked and should be restarted.
+
+#### Response
+
+```json
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{
+  "status": "ok",
+  "uptime_ms": 124357,
+  "pid": 1
+}
+```
+
+This endpoint **always** returns 200 from a live process. Do not put dependency checks here — degraded dependencies should fail readiness, not liveness, otherwise a transient outage causes a restart loop.
+
+### `GET /readyz` — readiness
+
+Returns 200 once the API has finished starting up and is ready to serve traffic. Returns 503 during startup, while `remote_files` cache initialization is in progress (when the feature is enabled), or after a `SIGTERM` is received (drain phase).
+
+#### Response (ready)
+
+```json
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{
+  "status": "ready",
+  "ready": true,
+  "checks": {
+    "runtimes_loaded": true,
+    "remote_files": true,
+    "not_shutting_down": true
+  },
+  "uptime_ms": 1235,
+  "pid": 1
+}
+```
+
+#### Response (not ready)
+
+```json
+HTTP/1.1 503 Service Unavailable
+Content-Type: application/json
+
+{
+  "status": "not_ready",
+  "ready": false,
+  "checks": {
+    "runtimes_loaded": true,
+    "remote_files": false,
+    "not_shutting_down": true
+  },
+  "uptime_ms": 312,
+  "pid": 1
+}
+```
+
+Each check:
+
+-   `runtimes_loaded`: language packages have been scanned and loaded.
+-   `remote_files`: the `remote_files` cache has been initialized. Always `true` when `PISTON_REMOTE_FILES_ENABLED=false`.
+-   `not_shutting_down`: process has not received `SIGTERM` / `SIGINT`.
+
+### Graceful shutdown
+
+On `SIGTERM` (the standard Kubernetes pod-termination signal):
+
+1. `not_shutting_down` flips to `false`. Subsequent `/readyz` returns 503, so the load balancer stops sending new traffic.
+2. The HTTP server stops accepting new connections.
+3. In-flight requests are allowed to finish, up to 25 seconds. After that the process force-exits.
+
+This means K8s `terminationGracePeriodSeconds` should be **at least 30s** to give in-flight long-running jobs a chance to finish.
+
+### Kubernetes probe example
+
+```yaml
+spec:
+  containers:
+    - name: piston
+      image: ghcr.io/engineer-man/piston
+      ports:
+        - containerPort: 2000
+      livenessProbe:
+        httpGet:
+          path: /healthz
+          port: 2000
+        initialDelaySeconds: 10
+        periodSeconds: 10
+        timeoutSeconds: 3
+        failureThreshold: 3
+      readinessProbe:
+        httpGet:
+          path: /readyz
+          port: 2000
+        initialDelaySeconds: 2
+        periodSeconds: 5
+        timeoutSeconds: 2
+        failureThreshold: 2
+      startupProbe:
+        httpGet:
+          path: /readyz
+          port: 2000
+        periodSeconds: 5
+        failureThreshold: 24 # allow up to 2 minutes to start
+  terminationGracePeriodSeconds: 30
+```
+
+The `startupProbe` is the safety net for slow startups (e.g. cold cache rehydration). Once it passes, `livenessProbe` takes over.
+
+For Cloud Run / Cloud Run Jobs, configure the same paths via the standard probe configuration on the service.

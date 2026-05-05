@@ -275,20 +275,20 @@ let config = {};
 for (const option_name in options) {
     const env_key = 'PISTON_' + option_name.to_upper_case();
     const option = options[option_name];
-    const parser = option.parser || (x => x);
     const env_val = process.env[env_key];
-    const parsed_val = parser(env_val);
-    const value = env_val === undefined ? option.default : parsed_val;
-    const validator_parameters =
-        env_val === undefined ? [value, value] : [parsed_val, env_val];
+    const env_set = env_val !== undefined;
+    const parser = option.parser || (x => x);
+    const parsed_val = env_set ? parser(env_val) : undefined;
+    const value = env_set ? parsed_val : option.default;
+    const validator_parameters = env_set ? [parsed_val, env_val] : [value, value];
     const validation_response = apply_validators(
         option.validators,
-        validator_parameters
+        validator_parameters,
     );
     if (validation_response !== true) {
         logger.error(
             `Config option ${option_name} failed validation:`,
-            validation_response
+            validation_response,
         );
         process.exit(1);
     }

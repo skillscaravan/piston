@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+require('dotenv').config({ path: '/piston_api/.env', override: false });
 require('nocamel');
 const Logger = require('logplease');
 const express = require('express');

@@ -1,6 +1,17 @@
+# Dockerfile-gcp
+#
+# Image used by .github/workflows/gcp-deploy.yaml. Build context is the repo
+# root (NOT api/), so all COPY paths are repo-root-relative.
+#
+# Functionally identical to api/Dockerfile; only the COPY paths differ.
+# Keep these two in sync until api/Dockerfile is retired.
+#
+# WARNING: base images below are EOL Debian buster + Node 15.10.0. Artifact
+# Registry vulnerability scanning will flag this. Migrating to bookworm + a
+# supported Node LTS is tracked separately and is out of scope for this image.
+
 FROM buildpack-deps:buster AS isolate
 # Debian buster reached EOL on 2024-06-30; redirect apt to archive.debian.org.
-# TODO: migrate base image to a current Debian release (bookworm) when feasible.
 RUN sed -i 's|http://deb.debian.org|http://archive.debian.org|g; s|http://security.debian.org/debian-security|http://archive.debian.org/debian-security|g' /etc/apt/sources.list && \
     sed -i '/buster-updates/d' /etc/apt/sources.list && \
     echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check-valid-until
@@ -17,7 +28,6 @@ FROM node:15.10.0-buster-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Same buster-EOL apt redirect as the isolate stage.
 RUN sed -i 's|http://deb.debian.org|http://archive.debian.org|g; s|http://security.debian.org/debian-security|http://archive.debian.org/debian-security|g' /etc/apt/sources.list && \
     sed -i '/buster-updates/d' /etc/apt/sources.list && \
     echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check-valid-until
@@ -34,7 +44,9 @@ RUN apt-get update && \
 RUN useradd -M piston
 
 # Create the data directory so the image is self-sufficient when no volume
-# is mounted at /piston. config.js validates this exists; entrypoint chowns it.
+# is mounted at /piston (e.g. on the first pod start before the PVC is bound,
+# or in any env that forgets to mount). config.js validates that this exists,
+# and the entrypoint chowns it; both must succeed or the container crash-loops.
 RUN mkdir -p /piston && chown piston:piston /piston
 
 COPY --from=isolate /usr/local/bin/isolate /usr/local/bin
@@ -43,9 +55,9 @@ COPY --from=isolate /usr/local/etc/isolate /usr/local/etc/isolate
 RUN sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && locale-gen
 
 WORKDIR /piston_api
-COPY ["package.json", "package-lock.json", "./"]
+COPY ["api/package.json", "api/package-lock.json", "./"]
 RUN npm install
-COPY ./src ./src
+COPY ./api/src ./src
 
 CMD ["/piston_api/src/docker-entrypoint.sh"]
 EXPOSE 2000/tcp

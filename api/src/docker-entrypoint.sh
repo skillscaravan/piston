@@ -44,6 +44,27 @@ cd isolate && \
 mkdir -p init && \
 echo 1 > init/cgroup.procs && \
 echo '+cpuset +memory' > cgroup.subtree_control && \
-echo "Initialized cgroup" && \
+echo "Initialized cgroup"
+
+# Restore any packages baked into the image (e.g. /opt/piston_pkg_cache/python/3.12.0)
+# onto the /piston/packages volume if they aren't already installed. This lets us
+# ship Python + libs + sitecustomize.py inside the image while still supporting
+# a PVC-mounted /piston/packages for cross-restart persistence.
+if [ -d /opt/piston_pkg_cache ]; then
+    for lang_dir in /opt/piston_pkg_cache/*/; do
+        lang="$(basename "$lang_dir")"
+        for ver_dir in "$lang_dir"*/; do
+            [ -d "$ver_dir" ] || continue
+            ver="$(basename "$ver_dir")"
+            dest="/piston/packages/$lang/$ver"
+            if [ ! -f "$dest/.ppman-installed" ]; then
+                echo "Restoring baked package $lang-$ver -> $dest"
+                mkdir -p "$(dirname "$dest")"
+                cp -a "$ver_dir" "$dest"
+            fi
+        done
+    done
+fi
+
 chown -R piston:piston /piston && \
 exec su -- piston -c 'ulimit -n 65536 && node /piston_api/src'

@@ -44,6 +44,11 @@ COPY packages/python/3.12.0 /pkg/python/3.12.0
 WORKDIR /pkg/python/3.12.0
 RUN bash build.sh && \
     cd /pkg/python/3.12.0 && \
+    # Generate pkg-info.json (normally produced by packages/Makefile via `jq`,
+    # but we bypass make here). runtime.js#load_package refuses to register the
+    # runtime without it. The build_platform string must match what
+    # api/src/globals.js computes at runtime ("docker-debian" on this image).
+    ./bin/python3 -c "import json; m=json.load(open('metadata.json')); m['build_platform']='docker-debian'; json.dump(m, open('pkg-info.json','w'))" && \
     echo "$(date +%s%3N)" > .ppman-installed && \
     # cache .env that ppman would normally generate from `source environment`
     env -i bash -c "cd /pkg/python/3.12.0 && source environment && env" \

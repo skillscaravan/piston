@@ -105,6 +105,17 @@ if [ -d /opt/piston_pkg_cache ]; then
                 mkdir -p "$(dirname "$dest")"
                 cp -a "$ver_dir" "$dest"
             fi
+
+            # Always regenerate .env from the actual destination path.
+            # The bake step ran from /pkg/<lang>/<ver>, so the baked .env's
+            # $PATH references /pkg/... which doesn't exist at runtime,
+            # producing 'python3.12: command not found' inside the sandbox.
+            # This mirrors what api/src/package.js does during a normal
+            # `ppman install`: cd <install_path>; source environment; env.
+            if [ -f "$dest/environment" ]; then
+                (cd "$dest" && env -i bash -c "source ./environment && env") \
+                    | grep -vE '^(PWD|OLDPWD|_|SHLVL)=' > "$dest/.env"
+            fi
         done
     done
 fi

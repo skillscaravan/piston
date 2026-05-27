@@ -7,6 +7,9 @@ const runtime = require('../runtime');
 const { Job } = require('../job');
 const package = require('../package');
 const globals = require('../globals');
+const remote_files = require('../remote_files');
+const code_validator = require('../code_validator');
+const output_filter = require('../output_filter');
 const logger = require('logplease').create('api/v2');
 
 function get_job(body) {
@@ -22,6 +25,8 @@ function get_job(body) {
         compile_timeout,
         run_cpu_time,
         compile_cpu_time,
+        tenant_id,
+        remote_files: req_remote_files,
     } = body;
 
     return new Promise((resolve, reject) => {
@@ -48,6 +53,22 @@ function get_job(body) {
             }
         }
 
+        const normalized_remote_files = req_remote_files ?? [];
+        if (normalized_remote_files.length > 0) {
+            try {
+                const file_names = files
+                    .map((f, i) => f.name || `file${i}.code`)
+                    .filter(Boolean);
+                remote_files.validate_remote_files_request(
+                    normalized_remote_files,
+                    tenant_id,
+                    file_names
+                );
+            } catch (err) {
+                return reject({ message: err.message });
+            }
+        }
+
         const rt = runtime.get_latest_runtime_matching_language_version(
             language,
             version
@@ -64,6 +85,23 @@ function get_job(body) {
         ) {
             return reject({
                 message: 'files must include at least one utf8 encoded file',
+            });
+        }
+
+        // Pre-execution source scan for known-dangerous patterns. The Python
+        // sitecustomize wrapper is the actual security boundary; this just
+        // returns a fast, clean error before Isolate is invoked. The rejection
+        // carries runtime metadata so the /execute handler can return a
+        // synthetic run-shaped response matching the sitecustomize path.
+        try {
+            code_validator.validate_code(files, rt.language);
+        } catch (err) {
+            return reject({
+                message: err.message,
+                kind: err.kind,
+                blocked_name: err.blocked_name,
+                runtime_language: rt.language,
+                runtime_version: rt.version.raw,
             });
         }
 
@@ -102,6 +140,8 @@ function get_job(body) {
                 args: args ?? [],
                 stdin: stdin ?? '',
                 files,
+                tenant_id: tenant_id ?? null,
+                remote_files: normalized_remote_files,
                 timeouts: {
                     run: run_timeout ?? rt.timeouts.run,
                     compile: compile_timeout ?? rt.timeouts.compile,
@@ -239,6 +279,15 @@ router.post('/execute', async (req, res) => {
     try {
         job = await get_job(req.body);
     } catch (error) {
+        if (error && error.kind === 'code_blocked') {
+            return res.status(200).json(
+                code_validator.make_blocked_response({
+                    language: error.runtime_language,
+                    version: error.runtime_version,
+                    blocked_name: error.blocked_name,
+                })
+            );
+        }
         return res.status(400).json(error);
     }
     try {
@@ -249,6 +298,10 @@ router.post('/execute', async (req, res) => {
         if (result.run === undefined) {
             result.run = result.compile;
         }
+
+        // Replace known noisy sandbox-induced tracebacks (e.g. disabled
+        // networking) with single-line messages before returning.
+        result = output_filter.sanitize_result(result);
 
         return res.status(200).send(result);
     } catch (error) {

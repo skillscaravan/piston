@@ -1,0 +1,86 @@
+name: Initiate Production Release
+on:
+  workflow_dispatch:
+    inputs:
+      ReleaseType:
+        description: 'Release Type'
+        required: true
+        default: 'warning'
+        type: choice
+        options:
+        - Major
+        - Feature
+        - Bug
+
+jobs:
+  TaggingNewVersion:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+     
+     - name : Checkout latest code
+       uses: actions/checkout@v3
+       with:
+          token: ${{ secrets.PAT }}
+          fetch-depth: 0 # Required due to the way Git works, without it this action won't be able to find any or the correct tags
+
+     - name: 'Set releasetype : ${{ inputs.ReleaseType }}'
+       id: releasetype
+       uses: ASzc/change-string-case-action@v5
+       with:
+        string: ${{ inputs.ReleaseType }}
+    
+     - name: 'Get Previous tag'
+       id: previoustag
+       uses: "WyriHaximus/github-action-get-previous-tag@v1"
+       with:
+        fallback: 0.0.1 # Optional fallback tag to use when no tag can be found
+    
+     - name: 'PreValidation'
+       id: PreValidation 
+       run: |
+        BRANCH="${GITHUB_REF#refs/heads/}"
+        if [ $BRANCH == 'main' ]
+        then
+          echo "Branch validation Successful "      
+        else
+          echo "Releases only taken from main branch :gun: " >> $GITHUB_STEP_SUMMARY
+          exit 1
+        fi
+
+        tag=${{ steps.previoustag.outputs.tag }}
+        read type tag_sha < <(echo $(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/${{ github.repository }}/git/ref/tags/$tag" | 
+             jq -r '.object.type,.object.sha'))
+
+        if [ $type == "commit" ]; then
+            echo "commit sha: $tag_sha"
+        else
+            sha=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/${{ github.repository }}/git/tags/$tag_sha" | jq '.object.sha')
+        fi
+        PreviousSha=${{ github.sha }}
+        if [[ $tag_sha == $PreviousSha ]]
+        then
+          echo "Nothing changed from last release :banana:" >> $GITHUB_STEP_SUMMARY
+          exit 1
+        fi
+    
+     - name: Bump release version
+       id: bump_version
+       uses: christian-draeger/increment-semantic-version@1.0.3
+       with:
+        current-version: ${{ steps.previoustag.outputs.tag }}
+        version-fragment: ${{ steps.releasetype.outputs.lowercase }}
+
+     - name: Push latest release tag [v.${{ steps.bump_version.outputs.next-version }}]
+       run: |
+          echo "Release type ${{ inputs.ReleaseType }}" >> $GITHUB_STEP_SUMMARY
+          echo :rocket: v.${{ steps.bump_version.outputs.next-version }} >> $GITHUB_STEP_SUMMARY
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git tag ${{ steps.bump_version.outputs.next-version }}
+          git push origin ${{ steps.bump_version.outputs.next-version }}
+
+     - name: Cancelling parallel jobs
+       if: failure()
+       uses: andymckay/cancel-action@0.3
+

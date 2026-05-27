@@ -1,5 +1,3 @@
-version: '3.2'
-
 services:
     api:
         build: api
@@ -10,7 +8,13 @@ services:
             - 2000:2000
         volumes:
             - ./data/piston/packages:/piston/packages
+            # Bind-mount src/ so JS edits are reflected without rebuilding the image.
+            # Restart the container after edits: `docker restart piston_api`.
+            - ./api/src:/piston_api/src
+        env_file:
+            - .env
         environment:
+            # Dev-specific; overrides anything in .env.
             - PISTON_REPO_URL=http://repo:8000/index
 
     repo: # Local testing of packages

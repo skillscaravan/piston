@@ -5,6 +5,7 @@ const path = require('path');
 const config = require('./config');
 const fs = require('fs/promises');
 const globals = require('./globals');
+const remote_files = require('./remote_files');
 
 const job_states = {
     READY: Symbol('Ready to be primed'),
@@ -31,6 +32,8 @@ class Job {
         timeouts,
         cpu_times,
         memory_limits,
+        tenant_id,
+        remote_files: job_remote_files,
     }) {
         this.uuid = uuidv4();
 
@@ -56,8 +59,80 @@ class Job {
         this.cpu_times = cpu_times;
         this.memory_limits = memory_limits;
 
+        this.tenant_id = tenant_id ?? null;
+        this.remote_files = (job_remote_files ?? []).map(rf => ({
+            url: rf.url,
+            name: rf.name,
+            version: rf.version ?? '',
+        }));
+
         this.state = job_states.READY;
         this.#dirty_boxes = [];
+    }
+
+    async #materialize_remote_files(submission_dir) {
+        const total_cap = config.remote_files_max_total_bytes;
+        let total_bytes = 0;
+
+        const resolved = await Promise.all(
+            this.remote_files.map(rf =>
+                remote_files.get_remote_file({
+                    tenant_id: this.tenant_id,
+                    url: rf.url,
+                    version: rf.version,
+                })
+            )
+        );
+
+        for (const r of resolved) {
+            total_bytes += r.size;
+            if (total_bytes > total_cap) {
+                throw Object.assign(
+                    new Error(
+                        `remote_files total size ${total_bytes} exceeds PISTON_REMOTE_FILES_MAX_TOTAL_BYTES=${total_cap}`
+                    ),
+                    { status: 400 }
+                );
+            }
+        }
+
+        await Promise.all(
+            resolved.map(async (r, i) => {
+                const dest_name = this.remote_files[i].name;
+                const dest_path = path.join(submission_dir, dest_name);
+                const rel = path.relative(submission_dir, dest_path);
+
+                if (rel.startsWith('..') || path.is_absolute(rel)) {
+                    throw Object.assign(
+                        new Error(
+                            `remote_files[${i}].name "${dest_name}" tries to escape submission directory`
+                        ),
+                        { status: 400 }
+                    );
+                }
+
+                await fs.mkdir(path.dirname(dest_path), {
+                    recursive: true,
+                    mode: 0o700,
+                });
+
+                try {
+                    await fs.link(r.cache_path, dest_path);
+                } catch (err) {
+                    if (err.code === 'EXDEV') {
+                        this.logger.warn(
+                            `Hardlink failed (cross-device) for cache=${r.cache_path} dest=${dest_path}; falling back to copy. Configure PISTON_REMOTE_FILES_CACHE_DIR on the same filesystem as the isolate box root for better performance.`
+                        );
+                        await fs.copy_file(r.cache_path, dest_path);
+                    } else if (err.code === 'EEXIST') {
+                        await fs.unlink(dest_path);
+                        await fs.link(r.cache_path, dest_path);
+                    } else {
+                        throw err;
+                    }
+                }
+            })
+        );
     }
 
     async #create_isolate_box() {
@@ -118,6 +193,10 @@ class Job {
                 mode: 0o700,
             });
             await fs.write_file(file_path, file_content);
+        }
+
+        if (this.remote_files.length > 0) {
+            await this.#materialize_remote_files(submission_dir);
         }
 
         this.state = job_states.PRIMED;

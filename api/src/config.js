@@ -137,6 +137,51 @@ const options = {
             validate_overrides,
         ],
     },
+    remote_files_enabled: {
+        desc: 'Set to true to allow callers to attach remote_files (e.g. signed URLs) to execute requests',
+        default: false,
+        parser: x => x === 'true',
+        validators: [x => typeof x === 'boolean' || `${x} is not a boolean`],
+    },
+    remote_files_host_allowlist: {
+        desc: 'Comma-separated list of hostnames allowed for remote_files URLs. Acts as the SSRF guard',
+        default: ['storage.googleapis.com'],
+        parser: parse_csv,
+        validators: [
+            x =>
+                Array.is_array(x) ||
+                `${x} could not be parsed as a comma-separated list`,
+        ],
+    },
+    remote_files_cache_dir: {
+        desc: 'Absolute path to the on-disk cache for remote_files. MUST be on the same filesystem as the isolate box root for hardlinks to work',
+        default: '/piston/remote-files-cache',
+        validators: [],
+    },
+    remote_files_cache_max_bytes: {
+        desc: 'Hard cap on total bytes stored in the remote_files cache; LRU eviction kicks in past this',
+        default: 5 * 1024 * 1024 * 1024,
+        parser: parse_int,
+        validators: [(x, raw) => !is_nan(x) || `${raw} is not a number`],
+    },
+    remote_files_max_object_size: {
+        desc: 'Per-object hard cap in bytes for remote_files. Fetches exceeding this are aborted',
+        default: 100 * 1024 * 1024,
+        parser: parse_int,
+        validators: [(x, raw) => !is_nan(x) || `${raw} is not a number`],
+    },
+    remote_files_max_total_bytes: {
+        desc: 'Maximum sum of remote_files object sizes per execute request',
+        default: 200 * 1024 * 1024,
+        parser: parse_int,
+        validators: [(x, raw) => !is_nan(x) || `${raw} is not a number`],
+    },
+    remote_files_fetch_timeout_ms: {
+        desc: 'Per-object fetch timeout in milliseconds',
+        default: 30000,
+        parser: parse_int,
+        validators: [(x, raw) => !is_nan(x) || `${raw} is not a number`],
+    },
 };
 
 Object.freeze(options);
@@ -149,6 +194,16 @@ function apply_validators(validators, validator_parameters) {
         }
     }
     return true;
+}
+
+function parse_csv(raw) {
+    if (raw === undefined || raw === null) return [];
+    if (Array.is_array(raw)) return raw;
+    if (typeof raw !== 'string') return null;
+    return raw
+        .split(',')
+        .map(x => x.trim())
+        .filter(x => x.length > 0);
 }
 
 function parse_overrides(overrides_string) {
@@ -220,20 +275,20 @@ let config = {};
 for (const option_name in options) {
     const env_key = 'PISTON_' + option_name.to_upper_case();
     const option = options[option_name];
-    const parser = option.parser || (x => x);
     const env_val = process.env[env_key];
-    const parsed_val = parser(env_val);
-    const value = env_val === undefined ? option.default : parsed_val;
-    const validator_parameters =
-        env_val === undefined ? [value, value] : [parsed_val, env_val];
+    const env_set = env_val !== undefined;
+    const parser = option.parser || (x => x);
+    const parsed_val = env_set ? parser(env_val) : undefined;
+    const value = env_set ? parsed_val : option.default;
+    const validator_parameters = env_set ? [parsed_val, env_val] : [value, value];
     const validation_response = apply_validators(
         option.validators,
-        validator_parameters
+        validator_parameters,
     );
     if (validation_response !== true) {
         logger.error(
             `Config option ${option_name} failed validation:`,
-            validation_response
+            validation_response,
         );
         process.exit(1);
     }

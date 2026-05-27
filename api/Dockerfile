@@ -1,4 +1,9 @@
 FROM buildpack-deps:buster AS isolate
+# Debian buster reached EOL on 2024-06-30; redirect apt to archive.debian.org.
+# TODO: migrate base image to a current Debian release (bookworm) when feasible.
+RUN sed -i 's|http://deb.debian.org|http://archive.debian.org|g; s|http://security.debian.org/debian-security|http://archive.debian.org/debian-security|g' /etc/apt/sources.list && \
+    sed -i '/buster-updates/d' /etc/apt/sources.list && \
+    echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check-valid-until
 RUN apt-get update && \
     apt-get install -y --no-install-recommends git libcap-dev && \
     rm -rf /var/lib/apt/lists/* && \
@@ -12,6 +17,11 @@ FROM node:15.10.0-buster-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Same buster-EOL apt redirect as the isolate stage.
+RUN sed -i 's|http://deb.debian.org|http://archive.debian.org|g; s|http://security.debian.org/debian-security|http://archive.debian.org/debian-security|g' /etc/apt/sources.list && \
+    sed -i '/buster-updates/d' /etc/apt/sources.list && \
+    echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check-valid-until
+
 RUN dpkg-reconfigure -p critical dash
 RUN apt-get update && \
     apt-get install -y libxml2 gnupg tar coreutils util-linux libc6-dev \
@@ -22,6 +32,11 @@ RUN apt-get update && \
     libsundials-dev libpcre2-dev libcap-dev && \
     rm -rf /var/lib/apt/lists/*
 RUN useradd -M piston
+
+# Create the data directory so the image is self-sufficient when no volume
+# is mounted at /piston. config.js validates this exists; entrypoint chowns it.
+RUN mkdir -p /piston && chown piston:piston /piston
+
 COPY --from=isolate /usr/local/bin/isolate /usr/local/bin
 COPY --from=isolate /usr/local/etc/isolate /usr/local/etc/isolate
 

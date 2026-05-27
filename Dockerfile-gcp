@@ -24,6 +24,31 @@ RUN apt-get update && \
     make -j$(nproc) install && \
     rm -rf /tmp/*
 
+# Stage: build the Python 3.12.0 Piston package (CPython + pip libs + sitecustomize)
+# This is baked into /opt/piston_pkg_cache and restored to /piston/packages on
+# container start via docker-entrypoint.sh, so prod gets the libs and sandbox
+# wrapper without needing a separate package repo or runtime ppman install.
+FROM buildpack-deps:buster AS python-builder
+RUN sed -i 's|http://deb.debian.org|http://archive.debian.org|g; s|http://security.debian.org/debian-security|http://archive.debian.org/debian-security|g' /etc/apt/sources.list && \
+    sed -i '/buster-updates/d' /etc/apt/sources.list && \
+    echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check-valid-until
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential curl ca-certificates \
+        libssl-dev zlib1g-dev libbz2-dev libreadline-dev libsqlite3-dev \
+        libffi-dev liblzma-dev libncurses5-dev libncursesw5-dev \
+        libgdbm-dev tk-dev libexpat1-dev \
+        gfortran libblas-dev liblapack-dev libfreetype6-dev libpng-dev && \
+    rm -rf /var/lib/apt/lists/*
+COPY packages/python/3.12.0 /pkg/python/3.12.0
+WORKDIR /pkg/python/3.12.0
+RUN bash build.sh && \
+    cd /pkg/python/3.12.0 && \
+    echo "$(date +%s%3N)" > .ppman-installed && \
+    # cache .env that ppman would normally generate from `source environment`
+    env -i bash -c "cd /pkg/python/3.12.0 && source environment && env" \
+        | grep -vE '^(PWD|OLDPWD|_|SHLVL)=' > .env
+
 FROM node:15.10.0-buster-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -51,6 +76,12 @@ RUN mkdir -p /piston && chown piston:piston /piston
 
 COPY --from=isolate /usr/local/bin/isolate /usr/local/bin
 COPY --from=isolate /usr/local/etc/isolate /usr/local/etc/isolate
+
+# Bake the Python package into a cache location. The entrypoint copies it into
+# /piston/packages/python/3.12.0 on container start if not already present, so
+# the same image works both with and without a PVC mounted at /piston/packages.
+RUN mkdir -p /opt/piston_pkg_cache/python && chown piston:piston /opt/piston_pkg_cache
+COPY --from=python-builder --chown=piston:piston /pkg/python/3.12.0 /opt/piston_pkg_cache/python/3.12.0
 
 RUN sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && locale-gen
 
